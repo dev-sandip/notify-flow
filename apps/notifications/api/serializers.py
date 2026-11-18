@@ -1,9 +1,11 @@
+from django.db import transaction
 from rest_framework import serializers
 
 from apps.notifications.models import (
     DeliveryAttempt,
     Notification,
 )
+from apps.notifications.tasks import send_notification_task
 
 
 class NotificationCreateSerializer(serializers.ModelSerializer):
@@ -18,7 +20,11 @@ class NotificationCreateSerializer(serializers.ModelSerializer):
             "status",
             "created_at",
         ]
-        read_only_fields = ["id", "status", "created_at"]
+        read_only_fields = [
+            "id",
+            "status",
+            "created_at",
+        ]
 
     def validate_scheduled_at(self, value):
         from django.utils import timezone
@@ -29,10 +35,30 @@ class NotificationCreateSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        return Notification.objects.create(
+        notification = Notification.objects.create(
             user=self.context["request"].user,
             **validated_data,
         )
+
+        notification.status = "QUEUED"
+        notification.save(update_fields=["status", "updated_at"])
+
+        notification_id = str(notification.id)
+        scheduled_at = notification.scheduled_at
+
+        def enqueue_notification():
+            if scheduled_at:
+                send_notification_task.apply_async(
+                    args=[notification_id],
+                    eta=scheduled_at,
+                )
+            else:
+                send_notification_task.delay(notification_id)
+
+        # Only enqueue after the database transaction commits.
+        transaction.on_commit(enqueue_notification)
+
+        return notification
 
 
 class DeliveryAttemptSerializer(serializers.ModelSerializer):
