@@ -1,9 +1,11 @@
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.notifications.models import (
     DeliveryAttempt,
     Notification,
+    NotificationStatus,
 )
 from apps.notifications.tasks import send_notification_task
 
@@ -27,36 +29,30 @@ class NotificationCreateSerializer(serializers.ModelSerializer):
         ]
 
     def validate_scheduled_at(self, value):
-        from django.utils import timezone
-
         if value and value <= timezone.now():
             raise serializers.ValidationError("Scheduled time must be in the future.")
-
         return value
 
     def create(self, validated_data):
+        scheduled_at = validated_data.get("scheduled_at")
+
+        # Immediate notifications are queued.
+        # Scheduled notifications remain pending.
+        initial_status = (
+            NotificationStatus.PENDING if scheduled_at else NotificationStatus.QUEUED
+        )
+
         notification = Notification.objects.create(
             user=self.context["request"].user,
+            status=initial_status,
             **validated_data,
         )
 
-        notification.status = "QUEUED"
-        notification.save(update_fields=["status", "updated_at"])
+        # Only immediate notifications are dispatched here.
+        if not scheduled_at:
+            notification_id = str(notification.id)
 
-        notification_id = str(notification.id)
-        scheduled_at = notification.scheduled_at
-
-        def enqueue_notification():
-            if scheduled_at:
-                send_notification_task.apply_async(
-                    args=[notification_id],
-                    eta=scheduled_at,
-                )
-            else:
-                send_notification_task.delay(notification_id)
-
-        # Only enqueue after the database transaction commits.
-        transaction.on_commit(enqueue_notification)
+            transaction.on_commit(lambda: send_notification_task.delay(notification_id))
 
         return notification
 

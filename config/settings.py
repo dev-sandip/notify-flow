@@ -216,7 +216,12 @@ CELERY_BROKER_URL = os.getenv(
     "CELERY_BROKER_URL",
     "amqp://notifyflow:notifyflow@localhost:5672//",
 )
-
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-due-notifications": {
+        "task": "notifications.dispatch_due",
+        "schedule": 30.0,
+    },
+}
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
