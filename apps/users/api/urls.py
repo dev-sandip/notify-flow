@@ -10,7 +10,7 @@ from .views import (
 )
 
 app_name = "users"
-
+# urlpatterns is a list of URL patterns that define the routing for the user-related API endpoints. Each path function maps a specific URL pattern to a corresponding view class, allowing users to register, log in, refresh tokens, log out, retrieve their profile information, and change their password. The app_name variable is used to namespace the URLs for this app, preventing naming conflicts with other apps in the project.
 urlpatterns = [
     path("register/", RegisterView.as_view(), name="register"),
     path("login/", LoginView.as_view(), name="login"),

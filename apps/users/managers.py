@@ -1,6 +1,7 @@
 from django.contrib.auth.base_user import BaseUserManager
 
 
+# BaseUserManager is a class provided by Django that allows you to create custom user managers for your user models. In this code snippet, the UserManager class inherits from BaseUserManager and provides methods for creating regular users and superusers.
 class UserManager(BaseUserManager):
     use_in_migrations = True
 
