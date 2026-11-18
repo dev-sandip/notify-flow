@@ -1,3 +1,4 @@
+
 import logging
 
 from celery import shared_task
@@ -5,6 +6,7 @@ from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 
+from apps.events.services import record_event
 from apps.notifications.models import (
     DeliveryAttempt,
     DeliveryStatus,
@@ -33,11 +35,16 @@ def send_notification_task(self, notification_id: str):
     Total maximum delivery attempts: 3.
     """
 
-    # Lock the notification while creating its delivery attempt.
+    # --------------------------------------------------
+    # 1. Lock notification and create delivery attempt
+    # --------------------------------------------------
+
     with transaction.atomic():
         try:
-            notification = Notification.objects.select_for_update().get(
-                id=notification_id
+            notification = (
+                Notification.objects.select_for_update().get(
+                    id=notification_id
+                )
             )
         except Notification.DoesNotExist:
             logger.warning(
@@ -46,7 +53,7 @@ def send_notification_task(self, notification_id: str):
             )
             return
 
-        # Do not send notifications that have already finished.
+        # Do not process completed or cancelled notifications.
         if notification.status in [
             NotificationStatus.SENT,
             NotificationStatus.FAILED,
@@ -64,6 +71,7 @@ def send_notification_task(self, notification_id: str):
         notification.status = NotificationStatus.PROCESSING
         notification.attempt_count = attempt_number
         notification.last_error = None
+
         notification.save(
             update_fields=[
                 "status",
@@ -79,11 +87,26 @@ def send_notification_task(self, notification_id: str):
             status=DeliveryStatus.PROCESSING,
         )
 
+        # Record processing event in the same transaction.
+        record_event(
+            event_type="notification.processing",
+            aggregate_type="notification",
+            aggregate_id=str(notification.id),
+            payload={
+                "notification_id": str(notification.id),
+                "attempt_number": attempt_number,
+                "status": NotificationStatus.PROCESSING,
+            },
+        )
+
         recipient_email = notification.recipient_email
         subject = notification.subject
         body = notification.body
 
-    # Send the email outside the database transaction.
+    # --------------------------------------------------
+    # 2. Send email outside the database transaction
+    # --------------------------------------------------
+
     try:
         sent_count = send_mail(
             subject=subject,
@@ -94,16 +117,22 @@ def send_notification_task(self, notification_id: str):
         )
 
         if sent_count != 1:
-            raise RuntimeError("Email backend did not send the message.")
+            raise RuntimeError(
+                "Email backend did not send the message."
+            )
 
     except Exception as exc:
         error_message = str(exc)
 
-        # Record the failed attempt.
+        # ----------------------------------------------
+        # 3. Record failed attempt and retry/failure event
+        # ----------------------------------------------
+
         with transaction.atomic():
             attempt.status = DeliveryStatus.FAILED
             attempt.error_message = error_message
             attempt.completed_at = timezone.now()
+
             attempt.save(
                 update_fields=[
                     "status",
@@ -112,16 +141,20 @@ def send_notification_task(self, notification_id: str):
                 ]
             )
 
-            notification = Notification.objects.select_for_update().get(
-                id=notification_id
+            notification = (
+                Notification.objects.select_for_update().get(
+                    id=notification_id
+                )
             )
 
             notification.last_error = error_message
 
             if self.request.retries < self.max_retries:
                 notification.status = NotificationStatus.RETRYING
+                event_type = "notification.retry_scheduled"
             else:
                 notification.status = NotificationStatus.FAILED
+                event_type = "notification.failed"
 
             notification.save(
                 update_fields=[
@@ -129,6 +162,18 @@ def send_notification_task(self, notification_id: str):
                     "last_error",
                     "updated_at",
                 ]
+            )
+
+            record_event(
+                event_type=event_type,
+                aggregate_type="notification",
+                aggregate_id=str(notification.id),
+                payload={
+                    "notification_id": str(notification.id),
+                    "attempt_number": attempt_number,
+                    "status": notification.status,
+                    "error": error_message,
+                },
             )
 
         logger.exception(
@@ -150,10 +195,14 @@ def send_notification_task(self, notification_id: str):
 
         return
 
-    # Email was accepted by the configured email backend.
+    # --------------------------------------------------
+    # 4. Record successful email delivery
+    # --------------------------------------------------
+
     with transaction.atomic():
         attempt.status = DeliveryStatus.SUCCESS
         attempt.completed_at = timezone.now()
+
         attempt.save(
             update_fields=[
                 "status",
@@ -161,11 +210,16 @@ def send_notification_task(self, notification_id: str):
             ]
         )
 
-        notification = Notification.objects.select_for_update().get(id=notification_id)
+        notification = (
+            Notification.objects.select_for_update().get(
+                id=notification_id
+            )
+        )
 
         notification.status = NotificationStatus.SENT
         notification.sent_at = timezone.now()
         notification.last_error = None
+
         notification.save(
             update_fields=[
                 "status",
@@ -173,6 +227,20 @@ def send_notification_task(self, notification_id: str):
                 "last_error",
                 "updated_at",
             ]
+        )
+
+        record_event(
+            event_type="notification.sent",
+            aggregate_type="notification",
+            aggregate_id=str(notification.id),
+            payload={
+                "notification_id": str(notification.id),
+                "recipient_email": notification.recipient_email,
+                "subject": notification.subject,
+                "attempt_number": attempt_number,
+                "status": NotificationStatus.SENT,
+                "sent_at": notification.sent_at.isoformat(),
+            },
         )
 
     logger.info(

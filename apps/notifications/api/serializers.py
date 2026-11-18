@@ -10,6 +10,9 @@ from apps.notifications.models import (
 from apps.notifications.tasks import send_notification_task
 
 
+from apps.events.services import record_event
+
+
 class NotificationCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
@@ -36,23 +39,43 @@ class NotificationCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         scheduled_at = validated_data.get("scheduled_at")
 
-        # Immediate notifications are queued.
-        # Scheduled notifications remain pending.
         initial_status = (
-            NotificationStatus.PENDING if scheduled_at else NotificationStatus.QUEUED
+            NotificationStatus.PENDING
+            if scheduled_at
+            else NotificationStatus.QUEUED
         )
 
-        notification = Notification.objects.create(
-            user=self.context["request"].user,
-            status=initial_status,
-            **validated_data,
-        )
+        with transaction.atomic():
+            notification = Notification.objects.create(
+                user=self.context["request"].user,
+                status=initial_status,
+                **validated_data,
+            )
 
-        # Only immediate notifications are dispatched here.
-        if not scheduled_at:
-            notification_id = str(notification.id)
+            record_event(
+                event_type="notification.created",
+                aggregate_type="notification",
+                aggregate_id=str(notification.id),
+                payload={
+                    "notification_id": str(notification.id),
+                    "user_id": str(notification.user_id),
+                    "recipient_email": notification.recipient_email,
+                    "subject": notification.subject,
+                    "status": notification.status,
+                    "scheduled_at": (
+                        notification.scheduled_at.isoformat()
+                        if notification.scheduled_at
+                        else None
+                    ),
+                },
+            )
 
-            transaction.on_commit(lambda: send_notification_task.delay(notification_id))
+            if not scheduled_at:
+                notification_id = str(notification.id)
+
+                transaction.on_commit(
+                    lambda: send_notification_task.delay(notification_id)
+                )
 
         return notification
 

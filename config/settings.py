@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "apps.users",
     "apps.notifications",
+    "apps.events"
 ]
 
 MIDDLEWARE = [
@@ -221,6 +222,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notifications.dispatch_due",
         "schedule": 30.0,
     },
+    "publish-outbox-events": {
+            "task": "events.publish_pending",
+            "schedule": 10.0,
+    },
 }
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
@@ -234,3 +239,12 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 
 CELERY_TASK_DEFAULT_QUEUE = "notifications"
+KAFKA_BOOTSTRAP_SERVERS = os.getenv(
+    "KAFKA_BOOTSTRAP_SERVERS",
+    "localhost:9092",
+)
+
+KAFKA_NOTIFICATION_TOPIC = os.getenv(
+    "KAFKA_NOTIFICATION_TOPIC",
+    "notifyflow.events",
+)

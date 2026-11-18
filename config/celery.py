@@ -9,3 +9,7 @@ app = Celery("notifyflow")
 
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
+
+app.conf.imports = (
+    "apps.events.tasks",
+)
